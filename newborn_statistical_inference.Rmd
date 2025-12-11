@@ -1,0 +1,612 @@
+---
+title: "Statistical Inference Analysis to predict newborn weight"
+author: "Luigi Carlucci"
+date: "2025-03-21"
+output:
+  pdf_document: default
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  dpi=180, fig.width = 10, fig.height = 6
+)
+```
+
+This project has as its final goal the creation of a statistical model capable of predicting newborn weight on the basis of clinical data collected on 2500 newborns from three hospitals.
+
+First, a set of libraries that will be used throughout the analysis is imported and the *newborns.csv* dataset is loaded.
+
+```{r}
+library(dplyr)
+library(kableExtra)
+library(moments) 
+library(ggplot2)
+library(GGally)
+library(ggcorrplot)
+library(patchwork)
+library(car)
+library(MASS)
+library(Metrics)
+library(lmtest)
+library(plotly)
+```
+
+```{r}
+df = read.csv("newborns.csv", stringsAsFactors = TRUE)
+attach(df)
+```
+
+```{r}
+kbl(head(df)) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## 1. Preliminary Analysis
+
+In the first phase, a descriptive analysis is carried out in order to explore the variables, understand their distribution and identify any anomalies.
+
+```{r}
+kbl(summary(df)) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+The normality of the `Weight` variable is checked, as it will be considered as the response variable in the regression model.
+
+```{r}
+# Calculation of skewness and kurtosis
+paste("Skewness:", round(skewness(Weight), 3))
+paste("Kurtosis:", round(kurtosis(Weight), 3))
+```
+
+The `Weight` variable has a negative skewness index, so the distribution is slightly left-skewed (with a longer left tail), and a positive kurtosis index, i.e. it has a *leptokurtic* distribution, as can also be seen from the density plot.
+
+```{r}
+ggplot(df) +
+  geom_density(aes(x = Weight), col = "black", fill = "steelblue") +
+  labs(title = "Density of newborn weight",
+       x = "Weight (g)", y = "Density")
+```
+
+```{r}
+# Shapiro–Wilk test to check normality
+shapiro.test(Weight)
+```
+
+Running the Shapiro–Wilk test, the null hypothesis of normality for the `Weight` variable is rejected. In this case, since the distribution of the response variable is not normal, the residuals of the regression model may also not have a normal distribution (which is one of the assumptions of linear regression), but this will be checked after the model has been created.
+
+Next, a correlation matrix is created to assess the relationships between the continuous numeric variables, and it is visualised graphically using the `ggcorrplot` package.
+
+```{r}
+# Correlation matrix (only for continuous numeric variables)
+cor_matrix <- cor(df %>% dplyr::select(Weight, Length, Cranium, Mother.age, Gestation.w))
+```
+
+```{r}
+# Visualisation of the correlation matrix with ggcorrplot
+ggcorrplot(cor_matrix, hc.order = TRUE, lab = TRUE)
+```
+
+Among the explanatory variables there do not appear to be strong correlations that would cause multicollinearity issues for the regression model, but this aspect will be further checked later using the Variance Inflation Factor (VIF).
+
+The relationships between the continuous variables are also visualised by means of a scatter plot matrix (pair plot), created with the `ggpairs` function from the `GGally` package.
+
+```{r}
+# Pair plot for the continuous numeric variables
+
+# Function to modify the parameters of the scatter plots
+lower_func <- function(data, mapping, ...) {
+  ggplot(data, mapping) + 
+    geom_point(size = 0.7, alpha = 0.5, position = "jitter") +
+    geom_smooth(method = "lm", color = "red")
+}
+
+pp = ggpairs(df, 
+             columns = c("Weight", "Length", "Cranium", "Mother.age", "Gestation.w"),
+             lower = list(continuous = lower_func))
+pp[5,1] = pp[5,1] + scale_x_continuous(breaks = c(1500, 3000, 4500))
+pp[5,2] = pp[5,2] + scale_x_continuous(breaks = c(350, 450, 550))
+pp
+```
+
+The impact of the qualitative variables `Sex`, `Smoker` (mother smoking status) and `Birth.type` on the `Weight` variable is then explored using boxplots.
+
+```{r fig.height=8, fig.width=8}
+# Boxplots to explore Weight with respect to qualitative variables
+bp1 = ggplot(df, aes(x = "", y = Weight)) + 
+  geom_boxplot(fill = "steelblue") +
+  ggtitle("Distribution of Weight (all newborns)")
+
+bp2 = ggplot(df, aes(x = Sex, y = Weight, fill = Sex)) + 
+  geom_boxplot() +
+  ggtitle("Distribution of Weight by Sex")
+
+bp3 = ggplot(df, aes(x = as.factor(Smoker), y = Weight, fill = as.factor(Smoker))) + 
+  geom_boxplot() +
+  ggtitle("Distribution of Weight by smoking status") + 
+  scale_x_discrete(name = "Smoker", labels = c("0" = "No", "1" = "Yes")) +
+  scale_fill_discrete(name = "Smoker", labels = c("No", "Yes"))
+
+bp4 = ggplot(df, aes(x = Birth.type, y = Weight, fill = Birth.type)) + 
+  geom_boxplot() +
+  ggtitle("Distribution of Weight by birth type")
+
+bp1 + bp2 + bp3 + bp4
+```
+
+## 2. Hypothesis Testing
+
+In this section the following hypotheses are now tested using the appropriate statistical tests:
+
+1.  In some hospitals more caesarean sections are performed
+2.  The means of `Weight` and `Length` in this sample of newborns are significantly equal to those of the population
+3.  The anthropometric measurements (`Weight`, `Length`, `Cranium`) are significantly different between the two sexes
+
+For the first point, it is checked whether the distribution of cesarean sections varies significantly between hospitals. A contingency table is then created between the variables `Hospital` and `Birth.type`, and a **Chi-square test** is performed, which is appropriate for testing the hypothesis of independence between qualitative variables.
+
+```{r}
+# Contingency table between Hospital and Birth.type
+tab_births <- table(df$Hospital, df$Birth.type)
+kbl(tab_births) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+```{r}
+# Chi-squared test
+chi2_test <- chisq.test(tab_births)
+print(chi2_test)
+```
+
+From the chi-squared test we obtain a p-value of $0.577$. Therefore, the hypothesis of independence between the variables `Hospital` and `Birth.type` cannot be rejected, i.e., there is no significant difference in the birth type between the three hospitals. Thus, no hospital performs significantly more cesarean sections.
+
+For the second point, the sample means of the variables `Weight` and `Length` are compared with the reference means of the population (Weight = 3300 g, Length = 500 mm, source: [Ospedale Bambino Gesu](https://www.ospedalebambinogesu.it/da-0-a-30-giorni-come-si-presenta-e-come-cresce-80012/)) to verify that they are equal. In this case, it is appropriate to use a **one-sample t-test** if the data are normal or a **Wilcoxon test** if they are not.
+
+It has already been checked, via the Shapiro–Wilk test, that the distribution of the `Weight` variable is not normal, so a **Wilcoxon test** is carried out.
+
+```{r}
+# Wilcoxon test for the variable Weight
+wilcox.test(Weight, mu = 3300)
+```
+
+The Wilcoxon test yields a p-value of $0.961$. Therefore the null hypothesis cannot be rejected: the mean weight of the newborns in the sample can be considered not significantly different from that of the population.
+
+A Shapiro–Wilk test is now performed to check the normality of the `Length` variable.
+
+```{r}
+shapiro.test(Length)
+```
+
+Here too the `Length` variable does not follow a normal distribution, so a **Wilcoxon test** is carried out with null hypothesis of equality to the population mean (500 mm).
+
+```{r}
+# Wilcoxon test for the variable Length
+wilcox.test(Length, mu = 500)
+```
+
+With a p-value $< 2.2\times10^{-16}$ the null hypothesis that the mean length of this sample of newborns is equal to that of the population is rejected. Therefore, it can be stated that the mean length calculated for this sample, equal to 494.7, is significantly lower than the population mean.
+
+For the third point, the distributions of `Weight`, `Length`, and `Cranium` between male and female newborns are compared to verify that they are significantly different between the two sexes. In this case, a **Two-sample independent t-test** (defined based on the categorical variable `Sex`) is used if the data are normal, or a **Wilcoxon test** if they are not. It had already been verified, using the Shapiro-Wilk test, that the data for the variables `Weight` and `Length` do not have a normal distribution, so the Wilcoxon test is performed.
+
+```{r}
+# Wilcoxon test for the variable Weight by Sex
+wilcox.test(Weight ~ Sex)
+```
+
+With a p-value $< 2.2\times10^{-16}$ the null hypothesis that the mean weight is the same in the two sexes is rejected: there is a significant difference in weight between males and females.
+
+```{r}
+# Wilcoxon test for the variable Length by Sex
+wilcox.test(Length ~ Sex)
+```
+
+Here again, with a p-value $< 2.2\times10^{-16}$ the null hypothesis that the mean length is the same in the two sexes is rejected: the mean length differs significantly between males and females.
+
+A Shapiro–Wilk test is now performed to check the normality of the `Cranium` variable.
+
+```{r}
+shapiro.test(Cranium)
+```
+
+Since the `Cranium` variable also does not have a normal distribution, a **Wilcoxon test** is carried out.
+
+```{r}
+# Wilcoxon test for the variable Cranium by Sex
+wilcox.test(Cranium ~ Sex)
+```
+
+With a p-value of $9.633 \times 10^{-15}$ the null hypothesis that the mean cranium diameter is the same between the two sexes is rejected: the measurement differs significantly between males and females.
+
+## 3. Building the Regression Model
+
+In this phase, a multiple linear regression model is developed in which `Weight` is the response variable and all variables in the dataset are included as explanatory variables. In this way, it is possible to quantify the impact of each independent variable on newborn weight.
+
+```{r}
+# Multiple linear regression model with all predictors
+mod1 <- lm(Weight ~ ., data = df)
+```
+
+```{r}
+# Model summary
+summary(mod1)
+```
+
+The model summary shows the regression coefficient estimates for all variables, which represent the marginal effects of the individual explanatory variables on the response variable `Weight`. However, although all variables (with the exception of the `Mother.age` variable ) have an effect on the `Weight` variable, not all variables are significant, as indicated by the high p-values.
+
+This suggests the possibility of developing a better model by excluding some of the explanatory variables included in this initial model. In particular, it is likely that eliminating the variables `Mother.age`, `Smoker`, and `Hospital` would result in a better and more parsimonious model.
+
+The Variance Inflation Factor (VIF) is also computed to assess possible multicollinearity between the independent variables included in the model.
+
+```{r}
+vif(mod1)
+```
+
+Since the VIF values are below 5 for all variables, there is no evidence of problematic multicollinearity, as also suggested above by observing the correlation matrix. Therefore, it is not necessary to remove variables for this reason.
+
+## 4. Selection of the Optimal Model
+
+In this phase, the most parsimonious model is selected, i.e. the model that balances goodness of fit and complexity, thus eliminating non-significant variables. This procedure is performed using the `stepAIC` function of the “MASS” library, which applies a stepwise selection to minimize the model's information criterion. In this case, the BIC (Bayesian Information Criterion) is used as criterion, which tends to be more parsimonious in the selection, retaining only variables that are strictly relevant.
+
+```{r}
+# Selection of the optimal model with stepwise procedure based on BIC
+n = nrow(df)
+stepwise.mod = stepAIC(mod1, direction = "both", k = log(n))
+```
+
+```{r}
+summary(stepwise.mod)
+```
+
+After the selection procedure, the best model according to BIC includes the following variables: `Pregnancies.n`, `Gestation.w`, `Length`, `Cranium`, `Sex`.
+
+```{r}
+# BIC comparison
+BIC(mod1, stepwise.mod)
+```
+
+Compared to the initial model, the selected model has a lower BIC, and is therefore preferable from the point of view of both simplicity and interpretation.
+
+Models with interactions between some of the predictors are now tested. In particular, a model including the interaction between `Pregnancies.n` and `Gestation.w` is first considered:
+
+```{r}
+# Model with interaction between Pregnancies.n and Gestation.w
+mod_int_1 = lm(
+  formula = Weight ~ Pregnancies.n * Gestation.w + Length + Cranium + Sex,
+  data = df
+)
+```
+
+```{r}
+summary(mod_int_1)
+```
+
+In this case, the interaction term (`Pregnancies.n:Gestation.w`) is not significant (p-value = 0.261).
+
+```{r}
+BIC(stepwise.mod, mod_int_1)
+```
+
+The BIC of this model is also higher than that of the stepwise model, so the interaction between `Pregnancies.n` and `Gestation.w` does not improve the model.
+
+A model with interaction between `Length` and `Cranium` is then tested:
+
+```{r}
+# Model with interaction between Sex and Gestation.w
+mod_int_2 = lm(
+  formula = Weight ~ Pregnancies.n + Gestation.w + Length * Cranium + Sex,
+  data = df
+)
+```
+
+```{r}
+summary(mod_int_2)
+```
+
+The interaction term (`Length:Cranium`) is here significant (p-value = $1.39 \times 10^{-6}$)
+
+```{r}
+BIC(stepwise.mod, mod_int_2)
+```
+
+In this case the BIC is also lower than that of the stepwise model. An ANOVA test is also performed, which takes into account the variance explained by the two models:
+
+```{r}
+anova(mod_int_2, stepwise.mod)
+```
+
+The result of the ANOVA test confirms that there is a significant increase in explained variance when the interaction is added, so `mod_int_2` can be considered a better model.
+
+Possible non-linear effects are now tested. In particular, by observing the prevously created scatter plots, the quadratic effect of the `Length` variable is first added to the model:
+
+```{r}
+# Model with Length^2
+mod_quad_1 = update(mod_int_2, ~ . + I(Length^2))
+```
+
+```{r}
+summary(mod_quad_1)
+```
+
+```{r}
+BIC(mod_int_2, mod_quad_1)
+```
+
+The quadratic term of the `Length` variable resulted to be very significant (p-value $< 2\times10^{-16}$ ). In addition, there is a further decrease in BIC and also a one point increase in the *adjusted R-squared* coefficient.
+
+The quadratic effect of the `Gestation.w` variable is now also added:
+
+```{r}
+# Model with Gestation.w^2
+mod_quad_2 = update(mod_quad_1, ~ . + I(Gestation.w^2))
+```
+
+```{r}
+summary(mod_quad_2)
+```
+
+```{r}
+BIC(mod_quad_1, mod_quad_2)
+```
+
+The quadratic term of the `Gestation.w` variable also results to be highly significant (p-value = $0.0002$). Moreover, there is a further decrease in BIC and a slight increase in the *adjusted R-squared*. An ANOVA test is performed to compare the models:
+
+```{r}
+anova(mod_quad_2, mod_int_2)
+```
+
+The result of the ANOVA test confirms that there is a significant gain in explained variance when the quadratic terms of `Length` and `Gestation.w` variables are included; `mod_quad_2` is therefore considered the best model among those fitted.
+
+## 5. Analysis of Model Quality
+
+In this phase, the predictive ability of the final model is first compared with that of the previous models, using three metrics:
+
+-   BIC
+
+-   adjusted R-squared
+
+-   Root Mean Squared Error (RMSE)
+
+RMSE is a metric that represents the average distance between the observed values and the values predicted by the model. A lower RMSE indicates a better ability of the model to predict data.
+
+```{r}
+# List of models
+models <- list(
+  "Base" = mod1,
+  "Stepwise" = stepwise.mod,
+  "Interaction" = mod_int_2,
+  "Quadratic" = mod_quad_2
+)
+```
+
+```{r}
+# Computation of the metrics for each model
+metrics <- data.frame(
+  BIC = sapply(models, BIC),
+  Adjusted_R2 = sapply(models, function(m) summary(m)$adj.r.squared),
+  RMSE = sapply(models, function(m) rmse(df$Weight, predict(m)))
+)
+```
+
+```{r}
+kbl(metrics) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+From the summary table, all the metrics (lower BIC, higher adjusted R-squared, lower RMSE) are better for the final model, which includes the quadratic terms, confirming that it is the most appropriate among those considered.
+
+A residual analysis of the model is now carried out.
+
+```{r fig.height=8, fig.width=8}
+par(mfrow = c(2, 2))
+plot(mod_quad_2, pch = 20)
+```
+
+From the diagnostic plots, residuals are largely normally distributed, but there are some values, particularly in the upper tail, showing some deviations from normality. Furthermore, the residuals do not appear to be evenly distributed around the mean of 0, i.e. they show a slight heteroscedasticity.
+
+Lastly, looking at the last of the four standard diagnostic plots, which shows potential influential observations on regression estimates (Cook’s distance), it can be seen that one of the observations exceeds both problematic thresholds of 0.5 and 1.
+
+Residual tests are now performed.
+
+```{r}
+# Normality test (Shapiro–Wilk)
+shapiro.test(residuals(mod_quad_2))
+```
+
+```{r}
+ggplot() +
+  geom_density(aes(x = residuals(mod_quad_2)), col = "black", fill = "steelblue") +
+  labs(title = "Density of residuals",
+       x = "Residuals", y = "Density")
+```
+
+The Shapiro-Wilk test confirms that the residuals do not appear to be perfectly normal. As can be seen from the density graph, this is mainly due to some extreme values in the two tails.
+
+```{r}
+# Homoscedasticity test (Breusch-Pagan)
+bptest(mod_quad_2)
+```
+
+The Breusch-Pagan test for homoscedasticity also indicates that the variance of the residuals is not constant, as previously suggested by the diagnostic plots.
+
+```{r}
+# Test of lack of autocorrelation (Durbin–Watson)
+dwtest(mod_quad_2)
+```
+
+From the Durbin–Watson test, the null hypothesis of no autocorrelation is not rejected, so the residuals do not show evidence of autocorrelation.
+
+To identify precisely any influential values, leverage values (hat values) are examined, which correspond to observations located far out in the space of the explanatory variables.
+
+```{r}
+# Leverage values
+hat = hatvalues(mod_quad_2)
+p = sum(hat)
+threshold = 2 * p/n
+plot(hat, pch = 20, main = "Leverage", ylab = "Hat values")
+abline(h = threshold, col = 2)
+```
+
+From the plot there are several leverage values that exceed the threshold (2·p/n), one of which by a considerable margin.
+
+Extreme values of the response variable (outliers) are also identified through the analysis of studentized residuals.
+
+```{r}
+# Studentized residuals
+plot(rstudent(mod_quad_2), pch = 20,
+     main = "Studentized residuals", ylab = "Studentized residuals")
+```
+
+```{r}
+# Outlier test based on studentized residuals
+outlierTest(mod_quad_2)
+```
+
+By performing a test on studentized residuals, it appears that in this case 5 values are classified as outliers, and therefore potentially influential values.
+
+The combined effect of leverage and outliers is now considered by computing and visualising Cook’s distances:
+
+```{r}
+cook = cooks.distance(mod_quad_2)
+plot(cook, pch = 20, main = "Cook's distance")
+abline(h = 0.5, col = 2)
+```
+
+```{r}
+# Values above the Cook's distance threshold of 0.5
+cook[cook > 0.5]
+```
+
+As already noted, only one value exceeds the Cook’s distance threshold of 0.5 and can therefore be considered influential. However, assuming that the observation is not a measurement error, the model can be considered sufficiently adequate.
+
+## 6. Predictions and Results
+
+In this phase, the model is used to make predictions, estimating the weight of a newborn by considering different combinations of values for the explanatory variables. To simplify the process, a function is created that takes the values of the explanatory variables of the model as arguments (with the median values of the dataset set as default values) and returns the prediction of the `Weight` variable.
+
+```{r}
+# Function to predict newborn weight
+weight_prediction = function(Pregnancies.n = 1, 
+                             Gestation.w = 39, 
+                             Length = 500, 
+                             Cranium = 340, 
+                             Sex = "M") {
+  
+  new_data <- data.frame(Pregnancies.n = c(Pregnancies.n), 
+                         Gestation.w = c(Gestation.w), 
+                         Length = c(Length),
+                         Cranium = c(Cranium),
+                         Sex = as.factor(c(Sex)))
+  
+  predicted_weight = predict(mod_quad_2, newdata = new_data)
+  
+  return(cat("Based on the following values:\n",
+             "\nNumber of pregnancies:", Pregnancies.n,
+             "\nWeeks of gestation:", Gestation.w,
+             "\nLength of the newborn (mm):", Length,
+             "\nCranium diameter of the newborn (mm):", Cranium, 
+             "\nSex of the newborn:", Sex, 
+             "\n\nThe estimated weight of the newborn (g) is:", predicted_weight))
+}
+```
+
+Without specifying any arguments, the function returns the prediction with the default values:
+
+```{r}
+weight_prediction()
+```
+
+Setting the `Sex` variable to `"F"`, the function returns the prediction for a female newborn:
+
+```{r}
+weight_prediction(Sex = "F")
+```
+
+It is possible to insert different combinations of arguments (e.g. `Pregnancies.n`, `Gestation.w`, `Sex`) to modify the values of the variables and return the corresponding prediction:
+
+```{r}
+weight_prediction(Pregnancies.n = 3)
+```
+
+```{r}
+weight_prediction(Pregnancies.n = 3, Sex = "F")
+```
+
+```{r}
+weight_prediction(Gestation.w = 28)
+```
+
+```{r}
+weight_prediction(Gestation.w = 28, Sex = "F")
+```
+
+By entering the values of all the variables included in the model, the predicted weight is estimated with the highest precision allowed by the model:
+
+```{r}
+weight_prediction(Pregnancies.n = 2, Gestation.w = 33, Length = 512, Cranium = 345, Sex = "F")
+```
+
+## 7. Visualizations
+
+Finally, several plots are created to visualise some of the most important relationships between the variables included in the model.
+
+For example, the relationship between the response variable `Weight` and the explanatory variable `Gestation.w` is shown by a scatter plot with colours representing `Sex` (also showing the corresponding regression lines) and different point sizes for `Length`:
+
+```{r}
+ggplot(data = df) + 
+  geom_point(aes(x = Gestation.w, y = Weight, colour = Sex, size = Length),
+             alpha = 0.2,
+             position = "jitter") +
+  geom_smooth(aes(x = Gestation.w, y = Weight, colour = Sex),
+              se = FALSE, method = "lm") +
+  labs(title = "Impact of Gestation, Sex and Length on Weight")
+```
+
+Then the relationship between `Weight` and `Length` is visualized, using point size to represent the `Gestation.w` variable:
+
+```{r}
+ggplot(data = df) + 
+  geom_point(aes(x = Length, y = Weight, colour = Sex, size = Gestation.w),
+             alpha = 0.2,
+             position = "jitter") +
+  geom_smooth(aes(x = Length, y = Weight, colour = Sex),
+              se = FALSE, method = "lm") +
+  labs(title = "Impact of Length, Sex and Gestation on Weight")
+```
+
+Using the `plotly` library, a three-dimensional scatter plot is created to display the joint effect of `Gestation.w` and `Length` on the response variable `Weight`, keeping two different colours for `Sex`:
+
+```{r fig.height=5, fig.width=7}
+fig <- plot_ly(data = df, 
+               x = ~Gestation.w, y = ~Length, z = ~Weight, 
+               color = ~Sex,
+               opacity = 0.5,
+               marker = list(size = 5)) %>%   
+  layout(title = "Impact of Gestation, Length and Sex on Weight",
+         legend = list(title = list(text = "Sex")))
+
+fig
+```
+
+Morever, in this way the point size can also be used to include a fifth variable, for example `Pregnancies.n`:
+
+```{r fig.height=5, fig.width=7}
+fig <- plot_ly(data = df, 
+               x = ~Gestation.w, y = ~Length, z = ~Weight, 
+               color = ~Sex, size = ~Pregnancies.n, sizes = c(50, 500),
+               text = ~paste('Number of pregnancies:', Pregnancies.n)) %>%   
+  layout(title = "Impact of Gestation, Length, Sex and Pregnancies num. on Weight",
+         legend = list(title = list(text = "Sex")))
+
+fig
+```
+
+## 8. Conclusions
+
+This inferential analysis on clinical data from 2500 newborns allowed to identify the main factors that influence birth weight and to build a regression model capable of predicting newborn weight from measurable clinical variables. Such a model may be useful to rapidly detect possible anomalies and plan in advance the use of intensive care.
+
+The analysis has also allowed several preliminary questions to be answered. Specifically, it was found that caesarean sections do not appear to be significantly more frequent in one hospital than in the others. Moreover, the mean of weight in the three hospitals considered is not significantly different from that of the reference population, whereas length is significantly lower. Lastly, the hypothesis that the anthropometric measurements (weight, length and cranium diameter) are significantly different between the two sexes has been confirmed.
+
+Some interesting conclusions emerged from the multiple regression analysis. For example, it was found that factors such as maternal smoking and mother's age do not significantly affect birth weight. Instead, duration of gestation and length have a strong effect on weight, and their relationship with weight is not linear, as shown by the improvement obtained by including quadratic terms. However, further work including other samples obtained from a higher number of hospitals or additional variables could lead to different results and more generalizable conclusions.
